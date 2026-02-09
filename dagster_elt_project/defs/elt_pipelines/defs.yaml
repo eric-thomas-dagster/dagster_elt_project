@@ -1,0 +1,8 @@
+# ELT Pipelines Component Instance
+type: dagster_elt_project.components.EltGithubComponent
+attributes:
+  repo_url: ${ELT_REPO_URL}
+  repo_branch: ${ELT_REPO_BRANCH}
+  github_token: ${GITHUB_TOKEN}
+  pipelines_directory: ${ELT_PIPELINES_DIR}
+  auto_refresh: true

@@ -1,0 +1,13 @@
+.env.deploy
+.env
+.tmp_dagster_home_*/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+dagster_elt_project/defs/*/repo_clone/
+dagster_elt_project/defs/*/pipelines_state.json

@@ -1,0 +1,58 @@
+[project]
+name = "dagster-elt-project"
+version = "0.1.0"
+description = "Dagster state-backed component for GitHub-hosted ELT pipelines"
+requires-python = ">=3.9"
+
+dependencies = [
+    "dagster>=1.12.0",
+    "dagster-webserver>=1.12.0",
+    "dagster-cloud>=1.12.0",
+    "dlt[duckdb]>=0.4.0",
+    "sling>=1.2.0",
+    "gitpython>=3.1.0",
+    "pyyaml>=6.0",
+    "pydantic>=2.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+dagster-elt-dev = "dagster_elt_project.cli:dev"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+]
+
+all-destinations = [
+    "dlt[snowflake,bigquery,redshift,postgres,motherduck,databricks]>=0.4.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["dagster_elt_project*"]
+exclude = ["deployment*"]
+
+[tool.dagster]
+module_name = "dagster_elt_project"
+defs_module = "dagster_elt_project"
+
+[tool.dg]
+directory_type = "project"
+
+[tool.dg.project]
+root_module = "dagster_elt_project"
+
+[tool.black]
+line-length = 100
+target-version = ['py39', 'py310', 'py311']
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"

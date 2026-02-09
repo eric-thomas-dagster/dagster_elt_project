@@ -1,0 +1,10 @@
+# Dagster Cloud deployment configuration
+locations:
+  - location_name: elt-pipelines
+    code_source:
+      python_file: dagster_elt_project/__init__.py
+    build:
+      directory: .
+      registry: ""
+    working_directory: .
+    executable_path: python

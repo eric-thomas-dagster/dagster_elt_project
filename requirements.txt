@@ -1,0 +1,23 @@
+# Core Dagster dependencies
+dagster>=1.12.0
+dagster-webserver>=1.12.0
+dagster-cloud>=1.12.0
+
+# ELT tools
+dlt[duckdb,snowflake,bigquery,redshift,postgres,motherduck,databricks]>=0.4.0
+sling>=1.2.0
+
+# Utilities
+gitpython>=3.1.0
+pyyaml>=6.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+
+# Development tools (optional)
+black>=23.0.0
+ruff>=0.1.0
+pytest>=7.0.0
+pytest-cov>=4.0.0
+
+# Install the package itself
+-e .
