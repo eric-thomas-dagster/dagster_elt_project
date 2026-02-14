@@ -11,3 +11,6 @@ dist/
 htmlcov/
 dagster_elt_project/defs/*/repo_clone/
 dagster_elt_project/defs/*/pipelines_state.json
+
+# macOS
+.DS_Store
