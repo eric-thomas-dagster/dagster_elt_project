@@ -17,26 +17,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import dagster as dg
 import yaml
+from pydantic import Field
 
 logger = logging.getLogger(__name__)
-from dagster import (
-    AssetExecutionContext,
-    AssetSelection,
-    Backoff,
-    DefaultScheduleStatus,
-    Definitions,
-    Jitter,
-    MetadataValue,
-    Output,
-    RetryPolicy,
-    ScheduleDefinition,
-    TimeWindowPartitionsDefinition,
-    StaticPartitionsDefinition,
-    asset,
-)
-from dagster.components import Component, ComponentLoadContext
-from pydantic import BaseModel, Field
 
 # Make git optional for environments where it's not available (e.g., Dagster Cloud)
 try:
@@ -49,69 +34,7 @@ except (ImportError, Exception):
 from ..schemas.dagster_metadata import DagsterMetadata
 
 
-class EltGithubComponentParams(BaseModel):
-    """Parameters for the EltGithubComponent.
-
-    All parameters can be set via environment variables.
-    """
-
-    repo_url: Optional[str] = Field(
-        default=None,
-        description="GitHub repository URL (env: ELT_REPO_URL)"
-    )
-    repo_branch: str = Field(
-        default="main",
-        description="Branch to clone/pull (env: ELT_REPO_BRANCH)"
-    )
-    github_token: Optional[str] = Field(
-        default=None,
-        description="GitHub token for private repos (env: GITHUB_TOKEN)"
-    )
-    pipelines_directory: str = Field(
-        default="pipelines",
-        description="Directory containing pipeline subdirectories (env: ELT_PIPELINES_DIR)"
-    )
-    auto_refresh: bool = Field(
-        default=True,
-        description="Automatically refresh state in dev mode (env: ELT_AUTO_REFRESH)"
-    )
-
-    @classmethod
-    def from_env(cls, **overrides):
-        """Load parameters from environment variables with optional overrides."""
-        import os
-        params = {}
-
-        # Only add params if they have actual values (not None)
-        repo_url = os.getenv("ELT_REPO_URL")
-        if repo_url:
-            params["repo_url"] = repo_url
-
-        repo_branch = os.getenv("ELT_REPO_BRANCH")
-        if repo_branch:
-            params["repo_branch"] = repo_branch
-
-        github_token = os.getenv("GITHUB_TOKEN")
-        if github_token:
-            params["github_token"] = github_token
-
-        pipelines_dir = os.getenv("ELT_PIPELINES_DIR")
-        if pipelines_dir:
-            params["pipelines_directory"] = pipelines_dir
-
-        auto_refresh_str = os.getenv("ELT_AUTO_REFRESH")
-        if auto_refresh_str:
-            params["auto_refresh"] = auto_refresh_str.lower() == "true"
-
-        # Apply overrides, but only if they're not None
-        for key, value in overrides.items():
-            if value is not None:
-                params[key] = value
-
-        return cls(**params)
-
-
-class DltPipelineInfo(BaseModel):
+class DltPipelineInfo(dg.Model):
     """Discovered dlt pipeline information."""
 
     name: str
@@ -124,7 +47,7 @@ class DltPipelineInfo(BaseModel):
         arbitrary_types_allowed = True
 
 
-class SlingReplicationInfo(BaseModel):
+class SlingReplicationInfo(dg.Model):
     """Discovered Sling replication information."""
 
     name: str
@@ -137,7 +60,7 @@ class SlingReplicationInfo(BaseModel):
         arbitrary_types_allowed = True
 
 
-class PipelineState(BaseModel):
+class PipelineState(dg.Model):
     """State data for discovered pipelines."""
 
     dlt_pipelines: List[DltPipelineInfo] = Field(default_factory=list)
@@ -150,37 +73,24 @@ class PipelineState(BaseModel):
         arbitrary_types_allowed = True
 
 
-class EltGithubComponent(Component):
+class EltGithubComponent(dg.Component, dg.Model, dg.Resolvable):
     """Enhanced state-backed component with scheduling, partitions, and rich metadata."""
 
-    @classmethod
-    def get_schema(cls):
-        """Return the params schema for this component."""
-        return EltGithubComponentParams
+    # Component parameters as class attributes (Dagster will read from defs.yaml)
+    repo_url: Optional[str] = None
+    repo_branch: str = "main"
+    github_token: Optional[str] = None
+    pipelines_directory: str = "pipelines"
+    auto_refresh: bool = True
 
-    def __init__(self, **params):
-        super().__init__()
-        # Load from environment variables if no parameters provided
-        if not params or not params.get("repo_url"):
-            self.params = EltGithubComponentParams.from_env(**params)
-        else:
-            self.params = EltGithubComponentParams(**params)
-
-    @staticmethod
-    def get_component_key_for_params(params: Dict[str, Any]) -> str:
-        """Generate a unique key for this component instance."""
-        repo_url = params.get("repo_url", "")
-        safe_url = repo_url.replace("https://", "").replace("http://", "").replace("/", "_")
-        return f"EltGithubComponent[{safe_url}]"
-
-    def build_defs(self, context: ComponentLoadContext) -> Definitions:
+    def build_defs(self, context: dg.ComponentLoadContext) -> dg.Definitions:
         """Required abstract method - delegates to build_defs_from_state for state-backed components."""
         # For state-backed components, this method is called after write_state_to_path
         # The actual implementation is in build_defs_from_state
         state_path = context.path
         return self.build_defs_from_state(context, state_path)
 
-    def write_state_to_path(self, context: ComponentLoadContext, path: Path) -> None:
+    def write_state_to_path(self, context: dg.ComponentLoadContext, path: Path) -> None:
         """Clone/pull the GitHub repo and discover pipeline directories."""
         state = PipelineState()
 
@@ -194,31 +104,28 @@ class EltGithubComponent(Component):
                 )
 
             # Validate required parameters
-            if not self.params.repo_url:
+            if not self.repo_url:
                 raise ValueError(
-                    "ELT_REPO_URL environment variable is required. "
-                    "Please set it to your GitHub repository URL."
+                    "repo_url parameter is required. "
+                    "Please set it in your defs.yaml or via ELT_REPO_URL environment variable."
                 )
             # Create a directory for cloning
             clone_dir = path / "repo_clone"
             clone_dir.mkdir(parents=True, exist_ok=True)
 
-            # GitHub token is already resolved by Dagster's EnvVar system
-            github_token = self.params.github_token
-
             # Clone or pull the repository
-            repo = self._clone_or_pull_repo(clone_dir, github_token)
+            repo = self._clone_or_pull_repo(clone_dir, self.github_token)
             state.repo_commit = repo.head.commit.hexsha
             state.repo_path = str(clone_dir)
 
             # Discover dlt pipelines
-            dlt_dir = clone_dir / self.params.pipelines_directory / "dlt"
+            dlt_dir = clone_dir / self.pipelines_directory / "dlt"
             if dlt_dir.exists():
                 state.dlt_pipelines = self._discover_dlt_pipelines(dlt_dir)
                 logger.info(f"Discovered {len(state.dlt_pipelines)} dlt pipelines")
 
             # Discover Sling replications
-            sling_dir = clone_dir / self.params.pipelines_directory / "sling"
+            sling_dir = clone_dir / self.pipelines_directory / "sling"
             if sling_dir.exists():
                 state.sling_replications = self._discover_sling_replications(sling_dir)
                 logger.info(
@@ -233,19 +140,19 @@ class EltGithubComponent(Component):
         state_file = path / "pipelines_state.json"
         state_file.write_text(state.model_dump_json(indent=2))
 
-    def build_defs_from_state(self, context: ComponentLoadContext, state_path: Path) -> Definitions:
+    def build_defs_from_state(self, context: dg.ComponentLoadContext, state_path: Path) -> dg.Definitions:
         """Build Dagster definitions with schedules, partitions, and rich metadata."""
         # Read state from disk
         state_file = state_path / "pipelines_state.json"
         if not state_file.exists():
             logger.warning("No pipeline state found. Run refresh to discover pipelines.")
-            return Definitions()
+            return dg.Definitions()
 
         state = PipelineState.model_validate_json(state_file.read_text())
 
         if state.error:
             logger.error(f"Error in pipeline state: {state.error}")
-            return Definitions()
+            return dg.Definitions()
 
         # Build assets and schedules
         all_assets = []
@@ -290,11 +197,11 @@ class EltGithubComponent(Component):
             f"(commit: {state.repo_commit[:8] if state.repo_commit else 'unknown'})"
         )
 
-        return Definitions(assets=all_assets, schedules=all_schedules)
+        return dg.Definitions(assets=all_assets, schedules=all_schedules)
 
     def _clone_or_pull_repo(self, clone_dir: Path, github_token: Optional[str]) -> Repo:
         """Clone or pull the GitHub repository."""
-        repo_url = self.params.repo_url
+        repo_url = self.repo_url
 
         if github_token:
             if "github.com" in repo_url:
@@ -302,9 +209,9 @@ class EltGithubComponent(Component):
 
         if (clone_dir / ".git").exists():
             repo = Repo(clone_dir)
-            repo.remotes.origin.pull(self.params.repo_branch)
+            repo.remotes.origin.pull(self.repo_branch)
         else:
-            repo = Repo.clone_from(repo_url, clone_dir, branch=self.params.repo_branch)
+            repo = Repo.clone_from(repo_url, clone_dir, branch=self.repo_branch)
 
         return repo
 
@@ -378,7 +285,7 @@ class EltGithubComponent(Component):
         """Build a Dagster partitions definition from config."""
         if partitions_config.type == "time":
             time_config = partitions_config.time
-            return TimeWindowPartitionsDefinition(
+            return dg.TimeWindowPartitionsDefinition(
                 start=time_config.start,
                 end=time_config.end,
                 cron_schedule=time_config.cron_schedule,
@@ -386,7 +293,7 @@ class EltGithubComponent(Component):
                 fmt=time_config.fmt,
             )
         elif partitions_config.type == "static":
-            return StaticPartitionsDefinition(partitions_config.static.partition_keys)
+            return dg.StaticPartitionsDefinition(partitions_config.static.partition_keys)
         else:
             raise ValueError(f"Unknown partition type: {partitions_config.type}")
 
@@ -404,29 +311,29 @@ class EltGithubComponent(Component):
         if metadata.metadata:
             for entry in metadata.metadata:
                 if entry.type == "url":
-                    custom_metadata[entry.key] = MetadataValue.url(str(entry.value))
+                    custom_metadata[entry.key] = dg.MetadataValue.url(str(entry.value))
                 elif entry.type == "path":
-                    custom_metadata[entry.key] = MetadataValue.path(str(entry.value))
+                    custom_metadata[entry.key] = dg.MetadataValue.path(str(entry.value))
                 elif entry.type == "md":
-                    custom_metadata[entry.key] = MetadataValue.md(str(entry.value))
+                    custom_metadata[entry.key] = dg.MetadataValue.md(str(entry.value))
                 elif entry.type == "json":
-                    custom_metadata[entry.key] = MetadataValue.json(entry.value)
+                    custom_metadata[entry.key] = dg.MetadataValue.json(entry.value)
                 else:
-                    custom_metadata[entry.key] = MetadataValue.text(str(entry.value))
+                    custom_metadata[entry.key] = dg.MetadataValue.text(str(entry.value))
 
         # Build retry policy from metadata (new format with fallback to legacy)
         retry_policy = None
         if metadata.retry_policy:
             # New format with backoff and jitter
             policy = metadata.retry_policy
-            backoff = Backoff.EXPONENTIAL if policy.backoff == "EXPONENTIAL" else Backoff.LINEAR
+            backoff = dg.Backoff.EXPONENTIAL if policy.backoff == "EXPONENTIAL" else dg.Backoff.LINEAR
             jitter = None
             if policy.jitter == "FULL":
-                jitter = Jitter.FULL
+                jitter = dg.Jitter.FULL
             elif policy.jitter == "PLUS_MINUS":
-                jitter = Jitter.PLUS_MINUS
+                jitter = dg.Jitter.PLUS_MINUS
 
-            retry_policy = RetryPolicy(
+            retry_policy = dg.RetryPolicy(
                 max_retries=policy.max_retries,
                 delay=policy.delay,
                 backoff=backoff,
@@ -434,10 +341,10 @@ class EltGithubComponent(Component):
             )
         elif metadata.retries and metadata.retries > 0:
             # Legacy format
-            retry_policy = RetryPolicy(
+            retry_policy = dg.RetryPolicy(
                 max_retries=metadata.retries,
                 delay=metadata.retry_delay or 60,
-                backoff=Backoff.LINEAR,  # Default to linear for legacy
+                backoff=dg.Backoff.LINEAR,  # Default to linear for legacy
             )
 
         # Build asset tags including kinds
@@ -450,7 +357,7 @@ class EltGithubComponent(Component):
         for kind in metadata.kinds:
             asset_tags[f"dagster/kind/{kind}"] = ""
 
-        @asset(
+        @dg.asset(
             name=f"dlt_{pipeline_info.name}",
             group_name=metadata.group_name,
             tags=asset_tags,
@@ -461,7 +368,7 @@ class EltGithubComponent(Component):
             owners=metadata.owners or [],
             retry_policy=retry_policy,
         )
-        def dlt_pipeline_asset(context: AssetExecutionContext):
+        def dlt_pipeline_asset(context: dg.AssetExecutionContext):
             """Execute standalone dlt pipeline with rich metadata."""
             logger.info(f"Running dlt pipeline: {pipeline_info.name}")
 
@@ -505,27 +412,27 @@ class EltGithubComponent(Component):
 
                 # Emit comprehensive metadata for Dagster+ observability
                 output_metadata = {
-                    "pipeline_name": MetadataValue.text(pipeline_info.name),
-                    "pipeline_type": MetadataValue.text("dlt"),
-                    "duration_seconds": MetadataValue.float(duration),
-                    "execution_time": MetadataValue.timestamp(end_time.timestamp()),
-                    "start_time": MetadataValue.timestamp(start_time.timestamp()),
-                    "pipeline_path": MetadataValue.path(str(pipeline_info.pipeline_py)),
+                    "pipeline_name": dg.MetadataValue.text(pipeline_info.name),
+                    "pipeline_type": dg.MetadataValue.text("dlt"),
+                    "duration_seconds": dg.MetadataValue.float(duration),
+                    "execution_time": dg.MetadataValue.timestamp(end_time.timestamp()),
+                    "start_time": dg.MetadataValue.timestamp(start_time.timestamp()),
+                    "pipeline_path": dg.MetadataValue.path(str(pipeline_info.pipeline_py)),
                 }
 
                 # Add source code link if GitHub repo is available
-                if self.params.repo_url and self.params.repo_branch:
+                if self.repo_url and self.repo_branch:
                     # Construct GitHub URL for the pipeline file
-                    repo_url = self.params.repo_url.rstrip('.git')
+                    repo_url = self.repo_url.rstrip('.git')
                     pipeline_rel_path = pipeline_info.pipeline_py.relative_to(
                         pipeline_info.pipeline_py.parent.parent.parent
                     )
-                    source_url = f"{repo_url}/blob/{self.params.repo_branch}/{pipeline_rel_path}"
-                    output_metadata["dagster/code_references"] = MetadataValue.url(source_url)
+                    source_url = f"{repo_url}/blob/{self.repo_branch}/{pipeline_rel_path}"
+                    output_metadata["dagster/code_references"] = dg.dg.MetadataValue.url(source_url)
 
                 # Extract comprehensive dlt-specific metadata
                 if hasattr(result, "dataset_name"):
-                    output_metadata["dataset_name"] = MetadataValue.text(result.dataset_name)
+                    output_metadata["dataset_name"] = dg.MetadataValue.text(result.dataset_name)
 
                 if hasattr(result, "load_packages") and result.load_packages:
                     load_package = result.load_packages[0]
@@ -533,10 +440,10 @@ class EltGithubComponent(Component):
                     # Table information
                     if hasattr(load_package, "schema") and hasattr(load_package.schema, "tables"):
                         tables = list(load_package.schema.tables.keys())
-                        output_metadata["tables_created"] = MetadataValue.md(
+                        output_metadata["tables_created"] = dg.MetadataValue.md(
                             "\n".join([f"- `{table}`" for table in tables])
                         )
-                        output_metadata["table_count"] = MetadataValue.int(len(tables))
+                        output_metadata["table_count"] = dg.MetadataValue.int(len(tables))
 
                     # Row counts and data volumes
                     if hasattr(load_package, "jobs") and load_package.jobs:
@@ -560,39 +467,39 @@ class EltGithubComponent(Component):
 
                         if total_rows > 0:
                             # Standard Dagster metadata
-                            output_metadata["dagster/row_count"] = MetadataValue.int(total_rows)
+                            output_metadata["dagster/row_count"] = dg.MetadataValue.int(total_rows)
                             # Custom metadata
-                            output_metadata["total_rows_loaded"] = MetadataValue.int(total_rows)
-                            output_metadata["total_bytes_loaded"] = MetadataValue.int(total_bytes)
-                            output_metadata["rows_per_second"] = MetadataValue.float(
+                            output_metadata["total_rows_loaded"] = dg.MetadataValue.int(total_rows)
+                            output_metadata["total_bytes_loaded"] = dg.MetadataValue.int(total_bytes)
+                            output_metadata["rows_per_second"] = dg.MetadataValue.float(
                                 total_rows / duration if duration > 0 else 0
                             )
                             # Format bytes in human-readable form
                             if total_bytes > 0:
                                 mb = total_bytes / (1024 * 1024)
-                                output_metadata["data_size_mb"] = MetadataValue.float(round(mb, 2))
+                                output_metadata["data_size_mb"] = dg.MetadataValue.float(round(mb, 2))
 
                         if job_details:
-                            output_metadata["load_details"] = MetadataValue.md("\n".join(job_details))
+                            output_metadata["load_details"] = dg.MetadataValue.md("\n".join(job_details))
 
                     # Pipeline state and trace
                     if hasattr(load_package, "state"):
                         state = load_package.state
-                        output_metadata["pipeline_state"] = MetadataValue.text(str(state))
+                        output_metadata["pipeline_state"] = dg.MetadataValue.text(str(state))
 
                 if partition_key:
-                    output_metadata["partition_key"] = MetadataValue.text(partition_key)
+                    output_metadata["partition_key"] = dg.MetadataValue.text(partition_key)
 
                 # Add source configuration metadata
                 if pipeline_info.metadata:
                     if pipeline_info.metadata.group_name:
-                        output_metadata["group"] = MetadataValue.text(pipeline_info.metadata.group_name)
+                        output_metadata["group"] = dg.MetadataValue.text(pipeline_info.metadata.group_name)
                     if pipeline_info.metadata.tags:
-                        output_metadata["tags"] = MetadataValue.json(pipeline_info.metadata.tags)
+                        output_metadata["tags"] = dg.MetadataValue.json(pipeline_info.metadata.tags)
 
                 logger.info(f"✅ Pipeline completed in {duration:.2f}s")
 
-                return Output(
+                return dg.Output(
                     value={"status": "success", "result": str(result)},
                     metadata=output_metadata,
                 )
@@ -617,29 +524,29 @@ class EltGithubComponent(Component):
         if metadata.metadata:
             for entry in metadata.metadata:
                 if entry.type == "url":
-                    custom_metadata[entry.key] = MetadataValue.url(str(entry.value))
+                    custom_metadata[entry.key] = dg.MetadataValue.url(str(entry.value))
                 elif entry.type == "path":
-                    custom_metadata[entry.key] = MetadataValue.path(str(entry.value))
+                    custom_metadata[entry.key] = dg.MetadataValue.path(str(entry.value))
                 elif entry.type == "md":
-                    custom_metadata[entry.key] = MetadataValue.md(str(entry.value))
+                    custom_metadata[entry.key] = dg.MetadataValue.md(str(entry.value))
                 elif entry.type == "json":
-                    custom_metadata[entry.key] = MetadataValue.json(entry.value)
+                    custom_metadata[entry.key] = dg.MetadataValue.json(entry.value)
                 else:
-                    custom_metadata[entry.key] = MetadataValue.text(str(entry.value))
+                    custom_metadata[entry.key] = dg.MetadataValue.text(str(entry.value))
 
         # Build retry policy from metadata (new format with fallback to legacy)
         retry_policy = None
         if metadata.retry_policy:
             # New format with backoff and jitter
             policy = metadata.retry_policy
-            backoff = Backoff.EXPONENTIAL if policy.backoff == "EXPONENTIAL" else Backoff.LINEAR
+            backoff = dg.Backoff.EXPONENTIAL if policy.backoff == "EXPONENTIAL" else dg.Backoff.LINEAR
             jitter = None
             if policy.jitter == "FULL":
-                jitter = Jitter.FULL
+                jitter = dg.Jitter.FULL
             elif policy.jitter == "PLUS_MINUS":
-                jitter = Jitter.PLUS_MINUS
+                jitter = dg.Jitter.PLUS_MINUS
 
-            retry_policy = RetryPolicy(
+            retry_policy = dg.RetryPolicy(
                 max_retries=policy.max_retries,
                 delay=policy.delay,
                 backoff=backoff,
@@ -647,10 +554,10 @@ class EltGithubComponent(Component):
             )
         elif metadata.retries and metadata.retries > 0:
             # Legacy format
-            retry_policy = RetryPolicy(
+            retry_policy = dg.RetryPolicy(
                 max_retries=metadata.retries,
                 delay=metadata.retry_delay or 60,
-                backoff=Backoff.LINEAR,  # Default to linear for legacy
+                backoff=dg.Backoff.LINEAR,  # Default to linear for legacy
             )
 
         # Build asset tags including kinds
@@ -663,7 +570,7 @@ class EltGithubComponent(Component):
         for kind in metadata.kinds:
             asset_tags[f"dagster/kind/{kind}"] = ""
 
-        @asset(
+        @dg.asset(
             name=f"sling_{replication_info.name}",
             group_name=metadata.group_name,
             tags=asset_tags,
@@ -674,7 +581,7 @@ class EltGithubComponent(Component):
             owners=metadata.owners or [],
             retry_policy=retry_policy,
         )
-        def sling_replication_asset(context: AssetExecutionContext):
+        def sling_replication_asset(context: dg.AssetExecutionContext):
             """Execute standalone Sling replication with rich metadata."""
             logger.info(f"Running Sling replication: {replication_info.name}")
 
@@ -704,23 +611,23 @@ class EltGithubComponent(Component):
 
                 # Parse comprehensive Sling output for metadata
                 output_metadata = {
-                    "replication_name": MetadataValue.text(replication_info.name),
-                    "replication_type": MetadataValue.text("sling"),
-                    "duration_seconds": MetadataValue.float(duration),
-                    "execution_time": MetadataValue.timestamp(end_time.timestamp()),
-                    "start_time": MetadataValue.timestamp(start_time.timestamp()),
-                    "replication_path": MetadataValue.path(str(replication_info.replication_yaml)),
-                    "sling_output": MetadataValue.md(f"```\n{result.stdout}\n```"),
+                    "replication_name": dg.MetadataValue.text(replication_info.name),
+                    "replication_type": dg.MetadataValue.text("sling"),
+                    "duration_seconds": dg.MetadataValue.float(duration),
+                    "execution_time": dg.MetadataValue.timestamp(end_time.timestamp()),
+                    "start_time": dg.MetadataValue.timestamp(start_time.timestamp()),
+                    "replication_path": dg.MetadataValue.path(str(replication_info.replication_yaml)),
+                    "sling_output": dg.MetadataValue.md(f"```\n{result.stdout}\n```"),
                 }
 
                 # Add source code link if GitHub repo is available
-                if self.params.repo_url and self.params.repo_branch:
-                    repo_url = self.params.repo_url.rstrip('.git')
+                if self.repo_url and self.repo_branch:
+                    repo_url = self.repo_url.rstrip('.git')
                     replication_rel_path = replication_info.replication_yaml.relative_to(
                         replication_info.replication_yaml.parent.parent.parent
                     )
-                    source_url = f"{repo_url}/blob/{self.params.repo_branch}/{replication_rel_path}"
-                    output_metadata["dagster/code_references"] = MetadataValue.url(source_url)
+                    source_url = f"{repo_url}/blob/{self.repo_branch}/{replication_rel_path}"
+                    output_metadata["dagster/code_references"] = dg.dg.MetadataValue.url(source_url)
 
                 # Parse Sling output for statistics
                 stdout_lines = result.stdout.split("\n")
@@ -746,33 +653,33 @@ class EltGithubComponent(Component):
 
                 if total_rows > 0:
                     # Standard Dagster metadata
-                    output_metadata["dagster/row_count"] = MetadataValue.int(total_rows)
+                    output_metadata["dagster/row_count"] = dg.MetadataValue.int(total_rows)
                     # Custom metadata
-                    output_metadata["total_rows_replicated"] = MetadataValue.int(total_rows)
-                    output_metadata["rows_per_second"] = MetadataValue.float(
+                    output_metadata["total_rows_replicated"] = dg.MetadataValue.int(total_rows)
+                    output_metadata["rows_per_second"] = dg.MetadataValue.float(
                         total_rows / duration if duration > 0 else 0
                     )
 
                 if streams_processed:
-                    output_metadata["streams_replicated"] = MetadataValue.md(
+                    output_metadata["streams_replicated"] = dg.MetadataValue.md(
                         "\n".join([f"- {stream}" for stream in streams_processed[:10]])  # Limit to 10
                     )
-                    output_metadata["stream_count"] = MetadataValue.int(len(streams_processed))
+                    output_metadata["stream_count"] = dg.MetadataValue.int(len(streams_processed))
 
                 if partition_key:
-                    output_metadata["partition_key"] = MetadataValue.text(partition_key)
+                    output_metadata["partition_key"] = dg.MetadataValue.text(partition_key)
 
                 # Add replication configuration metadata
                 if replication_info.metadata:
                     if replication_info.metadata.group_name:
-                        output_metadata["group"] = MetadataValue.text(replication_info.metadata.group_name)
+                        output_metadata["group"] = dg.MetadataValue.text(replication_info.metadata.group_name)
                     if replication_info.metadata.tags:
-                        output_metadata["tags"] = MetadataValue.json(replication_info.metadata.tags)
+                        output_metadata["tags"] = dg.MetadataValue.json(replication_info.metadata.tags)
 
                 logger.info(f"✅ Replication completed in {duration:.2f}s")
                 logger.info(f"Sling output:\n{result.stdout}")
 
-                return Output(
+                return dg.Output(
                     value={"status": "success", "output": result.stdout},
                     metadata=output_metadata,
                 )
@@ -790,11 +697,11 @@ class EltGithubComponent(Component):
         """Build a Dagster schedule from configuration."""
         # Convert string status to enum
         status_str = schedule_config.default_status.upper()
-        default_status = DefaultScheduleStatus.RUNNING if status_str == "RUNNING" else DefaultScheduleStatus.STOPPED
+        default_status = dg.DefaultScheduleStatus.RUNNING if status_str == "RUNNING" else dg.DefaultScheduleStatus.STOPPED
 
-        return ScheduleDefinition(
+        return dg.ScheduleDefinition(
             name=schedule_name,
-            target=AssetSelection.keys(asset_name),
+            target=dg.AssetSelection.keys(asset_name),
             cron_schedule=schedule_config.cron_schedule,
             execution_timezone=schedule_config.execution_timezone or schedule_config.timezone,
             default_status=default_status,
