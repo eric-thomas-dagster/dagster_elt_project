@@ -461,7 +461,7 @@ class EltGithubComponent(dg.Component, dg.Model, dg.Resolvable):
                         pipeline_info.pipeline_py.parent.parent.parent
                     )
                     source_url = f"{repo_url}/blob/{self.repo_branch}/{pipeline_rel_path}"
-                    output_metadata["dagster/code_references"] = dg.dg.MetadataValue.url(source_url)
+                    output_metadata["dagster/code_references"] = dg.MetadataValue.url(source_url)
 
                 # Extract comprehensive dlt-specific metadata
                 if hasattr(result, "dataset_name"):
@@ -660,7 +660,7 @@ class EltGithubComponent(dg.Component, dg.Model, dg.Resolvable):
                         replication_info.replication_yaml.parent.parent.parent
                     )
                     source_url = f"{repo_url}/blob/{self.repo_branch}/{replication_rel_path}"
-                    output_metadata["dagster/code_references"] = dg.dg.MetadataValue.url(source_url)
+                    output_metadata["dagster/code_references"] = dg.MetadataValue.url(source_url)
 
                 # Parse Sling output for statistics
                 stdout_lines = result.stdout.split("\n")
