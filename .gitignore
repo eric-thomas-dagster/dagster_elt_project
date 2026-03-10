@@ -14,3 +14,4 @@ dagster_elt_project/defs/*/pipelines_state.json
 
 # macOS
 .DS_Store
+*.duckdb

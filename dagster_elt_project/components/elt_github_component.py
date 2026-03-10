@@ -9,6 +9,7 @@ Features:
 """
 
 import importlib.util
+import inspect
 import json
 import logging
 import subprocess
@@ -425,9 +426,20 @@ class EltGithubComponent(dg.Component, dg.Model, dg.Resolvable):
                     partition_key = context.partition_key
                     logger.info(f"Running for partition: {partition_key}")
 
-                # Run the pipeline with partition key
+                # Check if run() function accepts partition_key parameter
+                run_signature = inspect.signature(module.run)
+                accepts_partition_key = 'partition_key' in run_signature.parameters
+
+                # Run the pipeline with or without partition key based on signature
                 start_time = datetime.now()
-                result = module.run(partition_key=partition_key)
+                if accepts_partition_key:
+                    result = module.run(partition_key=partition_key)
+                else:
+                    logger.warning(
+                        f"Pipeline {pipeline_info.name} run() function does not accept partition_key parameter. "
+                        "Consider regenerating this pipeline with the latest template."
+                    )
+                    result = module.run()
                 end_time = datetime.now()
                 duration = (end_time - start_time).total_seconds()
 
