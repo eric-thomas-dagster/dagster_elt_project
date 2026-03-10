@@ -200,7 +200,7 @@ class EltGithubComponent(dg.Component, dg.Model, dg.Resolvable):
         return dg.Definitions(assets=all_assets, schedules=all_schedules)
 
     def _clone_or_pull_repo(self, clone_dir: Path, github_token: Optional[str]) -> Repo:
-        """Clone or pull the GitHub repository."""
+        """Clone or pull the GitHub repository with conflict handling."""
         repo_url = self.repo_url
 
         if github_token:
@@ -209,9 +209,30 @@ class EltGithubComponent(dg.Component, dg.Model, dg.Resolvable):
 
         if (clone_dir / ".git").exists():
             repo = Repo(clone_dir)
-            repo.remotes.origin.pull(self.repo_branch)
+
+            # Check if auto_refresh is enabled
+            if not self.auto_refresh:
+                logger.info("Auto-refresh disabled, skipping git pull")
+                return repo
+
+            try:
+                # Check for local changes
+                if repo.is_dirty(untracked_files=True):
+                    logger.warning("Local changes detected, stashing before pull")
+                    repo.git.stash('save', '--include-untracked', 'Auto-stash by EltGithubComponent')
+
+                # Fetch and reset to remote
+                origin = repo.remotes.origin
+                origin.fetch()
+                repo.git.reset('--hard', f'origin/{self.repo_branch}')
+
+                logger.info(f"Successfully synced to latest commit on {self.repo_branch}")
+            except Exception as e:
+                logger.warning(f"Failed to pull latest changes: {e}. Using existing repo state.")
+                # Continue with existing repo state rather than failing
         else:
             repo = Repo.clone_from(repo_url, clone_dir, branch=self.repo_branch)
+            logger.info(f"Cloned repository from {repo_url}")
 
         return repo
 
